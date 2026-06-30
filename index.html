@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Liminal Escape</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+        body, html { width: 100%; height: 100%; overflow: hidden; background-color: #111; font-family: sans-serif; }
+        #gameCanvas { display: block; width: 100vw; height: 100vh; background-color: #000; }
+        
+        /* UI overlay */
+        #ui { position: absolute; top: 10px; left: 10px; color: #fff; text-shadow: 2px 2px 2px #000; font-size: 16px; pointer-events: none; }
+        #msg { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #ff3333; font-size: 32px; font-weight: bold; text-align: center; text-shadow: 3px 3px 5px #000; display: none; pointer-events: auto; background: rgba(0,0,0,0.8); padding: 20px; border-radius: 10px; }
+        #btnRestart { margin-top: 15px; padding: 10px 20px; font-size: 18px; background: #fff; border: none; cursor: pointer; border-radius: 5px; }
+
+        /* Touch Control Guides (Visual Only) */
+        .touch-zone { position: absolute; bottom: 20px; width: 120px; height: 120px; border: 2px dashed rgba(255,255,255,0.2); border-radius: 50%; pointer-events: none; display: flex; align-items: center; justify-content: center; color: rgba(255,255,255,0.3); font-size: 12px; }
+        #left-zone { left: 30px; }
+        #right-zone { right: 30px; }
+    </style>
+</head>
+<body>
+
+    <canvas id="gameCanvas"></canvas>
+    
+    <div id="ui">
+        <div id="status">出口を探せ。背後に気をつけろ...</div>
+    </div>
+
+    <div id="msg">
+        <span id="msgText">GAME OVER</span><br>
+        <button id="btnRestart" onclick="resetGame()">もう一度挑戦</button>
+    </div>
+
+    <div class="touch-zone" id="left-zone">移動</div>
+    <div class="touch-zone" id="right-zone">視点</div>
+
+    <script>
+        const canvas = document.getElementById("gameCanvas");
+        const ctx = canvas.getContext("2d");
+        const msgScreen = document.getElementById("msg");
+        const msgText = document.getElementById("msgText");
+
+        // 画面サイズ合わせ
+        function resizeCanvas() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        // --- マップデータ (1: 壁(リミナルイエロー), 0: 通路, 2: 出口) ---
+        const map = [
+            [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+            [1,0,0,0,0,1,0,0,0,0,0,0,0,0,0,1],
+            [1,0,1,1,0,1,0,1,1,1,1,1,1,0,1,1],
+            [1,0,1,0,0,0,0,1,0,0,0,0,1,0,0,1],
+            [1,0,1,0,1,1,1,1,0,1,1,0,1,1,0,1],
+            [1,0,0,0,1,0,0,0,0,1,0,0,0,1,0,1],
+            [1,1,1,0,1,0,1,1,0,1,1,1,0,1,0,1],
+            [1,0,0,0,0,0,1,2,0,0,0,1,0,0,0,1],
+            [1,0,1,1,1,0,1,1,1,1,0,1,1,1,0,1],
+            [1,0,0,0,1,0,0,0,0,1,0,1,0,0,0,1],
+            [1,1,1,0,1,1,1,1,0,1,0,1,0,1,1,1],
+            [1,0,0,0,0,0,0,1,0,0,0,0,0,0,0,1],
+            [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
+        ];
+        const MAP_WIDTH = map[0].length;
+        const MAP_HEIGHT = map.length;
+        const TILE_SIZE = 1.0;
+
+        // --- プレイヤー & 怪物ステート ---
+        let player, enemy, gameState;
+
+        function resetGame() {
+            player = {
+                x: 1.5,
+                y: 1.5,
+                angle: 0, // 向き（ラジアン）
+                fov: Math.PI / 3, // 視野角 60度
+                speed: 0,
+                sideSpeed: 0,
+                rotSpeed: 0
+            };
+
+            enemy = {
+                x: 14.5,
+                y: 11.5,
+                speed: 0.025,
+                active: false
+            };
+
+            gameState = "PLAY";
+            msgScreen.style.display = "none";
+            // 3秒後に怪物が動き出す
+            setTimeout(() => { if(gameState === "PLAY") enemy.active = true; }, 3000);
+        }
+
+        // --- タッチ＆キーボード操作の処理 ---
+        let touchStartLeft = {x:0, y:0}, touchMoveLeft = {x:0, y:0};
+        let touchStartRight = {x:0, y:0}, touchMoveRight = {x:0, y:0};
+        let isTouchingLeft = false, isTouchingRight = false;
+
+        // PC用キーボード
+        const keys = {};
+        window.addEventListener('keydown', (e) => keys[e.key] = true);
+        window.addEventListener('keyup', (e) => keys[e.key] = false);
+
+        // タッチイベント処理
+        window.addEventListener('touchstart', (e) => {
+            for(let i=0; i<e.touches.length; i++) {
+                let t = e.touches[i];
+                if(t.clientX < window.innerWidth / 2) {
+                    touchStartLeft = { x: t.clientX, y: t.clientY };
+                    touchMoveLeft = { x: t.clientX, y: t.clientY };
+                    isTouchingLeft = true;
+                } else {
+                    touchStartRight = { x: t.clientX, y: t.clientY };
+                    touchMoveRight = { x: t.clientX, y: t.clientY };
+                    isTouchingRight = true;
+                }
+            }
+        }, {passive: false});
+
+        window.addEventListener('touchmove', (e) => {
+            e.preventDefault(); // スクロール禁止
+            for(let i=0; i<e.touches.length; i++) {
+                let t = e.touches[i];
+                if(t.clientX < window.innerWidth / 2 && isTouchingLeft) {
+                    touchMoveLeft = { x: t.clientX, y: t.clientY };
+                } else if(t.clientX >= window.innerWidth / 2 && isTouchingRight) {
+                    touchMoveRight = { x: t.clientX, y: t.clientY };
+                }
+            }
+        }, {passive: false});
+
+        window.addEventListener('touchend', (e) => {
+            if (e.touches.length === 0) {
+                isTouchingLeft = false;
+                isTouchingRight = false;
+            } else {
+                // まだ残っているタッチに応じてフラグを更新
+                let leftStillExists = false;
+                let rightStillExists = false;
+                for(let i=0; i<e.touches.length; i++) {
+                    if(e.touches[i].clientX < window.innerWidth / 2) leftStillExists = true;
+                    else rightStillExists = true;
+                }
+                if(!leftStillExists) isTouchingLeft = false;
+                if(!rightStillExists) isTouchingRight = false;
+            }
+        });
+
+        // --- アップデート処理 ---
+        function update() {
+            if (gameState !== "PLAY") return;
+
+            // 1. プレイヤーの移動入力計算
+            player.speed = 0;
+            player.sideSpeed = 0;
+            player.rotSpeed = 0;
+
+            // キーボード操作 (PC)
+            if (keys['w'] || keys['ArrowUp']) player.speed = 0.04;
+            if (keys['s'] || keys['ArrowDown']) player.speed = -0.04;
+            if (keys['a']) player.sideSpeed = -0.03;
+            if (keys['d']) player.sideSpeed = 0.03;
+            if (keys['ArrowLeft']) player.rotSpeed = -0.04;
+            if (keys['ArrowRight']) player.rotSpeed = 0.04;
+
+            // スマホタッチ操作
+            if (isTouchingLeft) {
+                let dy = touchMoveLeft.y - touchStartLeft.y;
+                let dx = touchMoveLeft.x - touchStartLeft.x;
+                player.speed = -dy * 0.001; // 前後移動
+                player.sideSpeed = dx * 0.001; // 横移動
+                // 速度制限
+                player.speed = Math.max(-0.04, Math.min(0.04, player.speed));
+                player.sideSpeed = Math.max(-0.03, Math.min(0.03, player.sideSpeed));
+            }
+            if (isTouchingRight) {
+                let dx = touchMoveRight.x - touchStartRight.x;
+                player.rotSpeed = dx * 0.0008; // 視点旋回
+                player.rotSpeed = Math.max(-0.05, Math.min(0.05, player.rotSpeed));
+            }
+
+            // 2. 衝突判定付きの移動処理
+            player.angle += player.rotSpeed;
+            
+            let moveX = player.speed * Math.cos(player.angle) + player.sideSpeed * Math.cos(player.angle + Math.PI/2);
+            let moveY = player.speed * Math.sin(player.angle) + player.sideSpeed * Math.sin(player.angle + Math.PI/2);
+
+            let newX = player.x + moveX;
+            let newY = player.y + moveY;
+
+            // 壁判定 (少しマージンを取る)
+            if (map[Math.floor(player.y)][Math.floor(newX)] === 0 || map[Math.floor(player.y)][Math.floor(newX)] === 2) player.x = newX;
+            if (map[Math.floor(newY)][Math.floor(player.x)] === 0 || map[Math.floor(newY)][Math.floor(player.x)] === 2) player.y = newY;
+
+            // ゴール判定
+            if (map[Math.floor(player.y)][Math.floor(player.x)] === 2) {
+                gameState = "CLEAR";
+                msgText.innerText = "ESCAPE SUCCESS\n空間からの脱出に成功した";
+                msgText.style.color = "#33ff33";
+                msgScreen.style.display = "block";
+            }
+
+            // 3. 怪物のAI移動 (単純にプレイヤーに直進)
+            if (enemy.active) {
+                let edx = player.x - enemy.x;
+                let edy = player.y - enemy.y;
+                let dist = Math.sqrt(edx*edx + edy*edy);
+                
+                if (dist < 0.35) { // 捕獲判定
+                    gameState = "GAMEOVER";
+                    msgText.innerText = "CAUGHT\nあなたは捕まった";
+                    msgText.style.color = "#ff3333";
+                    msgScreen.style.display = "block";
+                }
+
+                // 壁を無視してじわじわ迫る（恐怖演出）
+                enemy.x += (edx / dist) * enemy.speed;
+                enemy.y += (edy / dist) * enemy.speed;
+            }
+        }
+
+        // --- 3D描画処理 (レイキャスティング法) ---
+        function draw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // 天井と床の描画 (リミナルスペース特有のくすんだ色)
+            ctx.fillStyle = "#3a382c"; // 天井
+            ctx.fillRect(0, 0, canvas.width, canvas.height / 2);
+            ctx.fillStyle = "#5e5b4c"; // カーペット床
+            ctx.fillRect(0, canvas.height / 2, canvas.width, canvas.height / 2);
+
+            const numRays = canvas.width;
+            const halfFov = player.fov / 2;
+            let spriteBuffer = []; // 怪物描画用
+
+            // レイキャスティングによる壁のレンダリング
+            for (let i = 0; i < numRays; i++) {
+                let rayAngle = player.angle - halfFov + (i / numRays) * player.fov;
+                let distanceToWall = 0;
+                let hitWall = false;
+                let wallType = 0;
+
+                let eyeX = Math.cos(rayAngle);
+                let eyeY = Math.sin(rayAngle);
+
+                while (!hitWall && distanceToWall < 16.0) {
+                    distanceToWall += 0.05;
+                    let testX = Math.floor(player.x + eyeX * distanceToWall);
+                    let testY = Math.floor(player.y + eyeY * distanceToWall);
+
+                    if (testX < 0 || testX >= MAP_WIDTH || testY < 0 || testY >= MAP_HEIGHT) {
+                        hitWall = true;
+                        distanceToWall = 16.0;
+                    } else {
+                        let cell = map[testY][testX];
+                        if (cell > 0) {
+                            hitWall = true;
+                            wallType = cell;
+                        }
+                    }
+                }
+
+                // 魚眼レンズ歪みの補正
+                let correctedDist = distanceToWall * Math.cos(rayAngle - player.angle);
+                let wallHeight = Math.min(canvas.height, (canvas.height / correctedDist));
+
+                // 陰影計算 (遠くほど暗く)
+                let shade = Math.max(0, 1 - (correctedDist / 12));
+                
+                if (wallType === 1) {
+                    // リミナルイエロー（壁）
+                    ctx.fillStyle = `rgba(210, 195, 120, ${shade})`; 
+                } else if (wallType === 2) {
+                    // 出口（不気味に光る緑のモザイクエリア）
+                    ctx.fillStyle = `rgba(50, 220, 100, ${shade})`;
+                }
+                
+                ctx.fillRect(i, (canvas.height - wallHeight) / 2, 1, wallHeight);
+            }
+
+            // --- 4. 怪物の3D描画 (スプライト処理) ---
+            let ex = enemy.x - player.x;
+            let ey = enemy.y - player.y;
+
+            // プレイヤーの向きに対する相対角度
+            let enemyAngle = Math.atan2(ey, ex) - player.angle;
+            // 角度を -PI から PI の範囲に正規化
+            while (enemyAngle < -Math.PI) enemyAngle += Math.PI * 2;
+            while (enemyAngle > Math.PI) enemyAngle -= Math.PI * 2;
+
+            // 視野内に入っているかチェック
+            if (Math.abs(enemyAngle) < player.fov) {
+                let enemyDist = Math.sqrt(ex*ex + ey*ey);
+                let enemyShade = Math.max(0, 1 - (enemyDist / 12));
+                
+                let spriteHeight = Math.min(canvas.height, (canvas.height / enemyDist) * 0.8);
+                let spriteWidth = spriteHeight * 0.5;
+                
+                // 画面上のX座標を計算
+                let screenX = (canvas.width / 2) + (enemyAngle / (player.fov / 2)) * (canvas.width / 2) - spriteWidth / 2;
+                let screenY = (canvas.height - spriteHeight) / 2;
+
+                // 描画（黒い人型の影、目は赤く光る）
+                if (enemyDist > 0.3) {
+                    ctx.fillStyle = `rgba(15, 15, 15, ${enemyShade})`;
+                    ctx.fillRect(screenX, screenY, spriteWidth, spriteHeight);
+                    // 恐怖の赤い目
+                    ctx.fillStyle = `rgba(255, 0, 0, ${enemyShade})`;
+                    ctx.fillRect(screenX + spriteWidth*0.3, screenY + spriteHeight*0.15, spriteWidth*0.15, spriteWidth*0.15);
+                    ctx.fillRect(screenX + spriteWidth*0.55, screenY + spriteHeight*0.15, spriteWidth*0.15, spriteWidth*0.15);
+                }
+            }
+        }
+
+        // --- メインループ ---
+        function loop() {
+            update();
+            draw();
+            requestAnimationFrame(loop);
+        }
+
+        // 初期化起動
+        resetGame();
+        loop();
+    </script>
+</body>
+</html>
